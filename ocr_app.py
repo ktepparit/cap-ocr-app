@@ -5,17 +5,25 @@ from PIL import Image
 # --- ตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="Kratingdaeng AI Scanner", page_icon="⚡", layout="centered")
 
-# --- ส่วนใส่ API Key ---
+# --- ส่วนใส่ API Key (ปรับปรุงใหม่เพื่อความปลอดภัย) ---
 with st.sidebar:
     st.header("🔑 ตั้งค่าระบบ")
     st.success("Model: gemini-pro-latest")
     
-    default_api_key = "AIzaSyCmWmCTFIZ31hNPYdQMjwGfEzP9SxJnl6o" 
-    api_key_input = st.text_input("ใส่ Google API Key", value=default_api_key, type="password")
-    api_key = api_key_input if api_key_input else default_api_key
-    
-    if not api_key:
-        st.warning("⚠️ ต้องใส่ API Key ก่อนใช้งาน")
+    api_key = None
+
+    # 1. เช็คว่ามีรหัสซ่อนอยู่ใน App Settings (Secrets) หรือไม่?
+    if "GOOGLE_API_KEY" in st.secrets:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+        st.info("✅ เชื่อมต่อ API Key จาก App Settings แล้ว")
+    else:
+        # 2. ถ้าไม่มีใน Settings ให้แสดงช่องกรอกเหมือนเดิม (Fallback)
+        # ลบ default_api_key ที่แปะทิ้งไว้ในโค้ดออกเพื่อความปลอดภัย
+        api_key_input = st.text_input("ใส่ Google API Key", type="password")
+        api_key = api_key_input
+        
+        if not api_key:
+            st.warning("⚠️ ไม่พบ API Key ใน Settings กรุณากรอกเอง")
 
 # --- ฟังก์ชันอ่านภาพด้วย Gemini ---
 def gemini_vision_scan(image_pil, key):
@@ -109,7 +117,7 @@ try:
                         else:
                             st.caption(f"⚠️ อ่านได้ {len(clean_code)} หลัก")
     else:
-        st.info("👈 กรุณาใส่ API Key ทางด้านซ้ายเพื่อเริ่มใช้งาน")
+        st.info("👈 กรุณาตั้งค่า API Key ใน App Settings หรือกรอกทางด้านซ้ายเพื่อเริ่มใช้งาน")
 
 except Exception as main_e:
     st.error(f"Critical: {main_e}")
