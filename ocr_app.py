@@ -1,108 +1,102 @@
 import streamlit as st
 import easyocr
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import re
 
 # --- ตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="Kratingdaeng OCR Scanners", page_icon="⚡", layout="centered")
 
-# --- โหลดโมเดล (Cache) ---
+# --- โหลดโมเดล ---
 @st.cache_resource
 def load_model():
-    # allowlist: อ่านเฉพาะ A-Z และ 0-9
+    # allowlist ยังคงใช้เพื่อจำกัดขอบเขตการเดาของ AI
     return easyocr.Reader(['en'], gpu=False)
 
-with st.spinner('กำลังเตรียมระบบอ่านรหัส...'):
+with st.spinner('กำลังเตรียมระบบ...'):
     reader = load_model()
 
-# --- ฟังก์ชันช่วย: ตรวจสอบกฎเหล็ก (Logic ตามที่คุณขอ) ---
+# --- Logic: ตรวจสอบเงื่อนไข 9 หลัก + เลข 0/2 ตัว ---
 def is_valid_pattern(text):
-    # 1. ต้องยาว 9 ตัว
     if len(text) != 9:
         return False
-        
-    # 2. นับจำนวนตัวเลข
     digit_count = sum(c.isdigit() for c in text)
-    
-    # เงื่อนไข: (ตัวเลข 0 ตัว) หรือ (ตัวเลข 2 ตัว) เท่านั้น
-    if digit_count == 0 or digit_count == 2:
-        return True
-    
-    return False
+    return digit_count == 0 or digit_count == 2
 
-# --- ฟังก์ชันช่วย: ตัดขอบภาพ (Center Crop) ---
-def crop_center(image, crop_percent=15):
-    # ตัดขอบออกด้านละ 15-20% เพื่อตัดคำว่า HDPE หรือตัวเลขนูนที่ขอบฝาออก
+# --- Preprocessing ขั้นเทพ (แก้ W->U, K->I) ---
+def enhance_image_for_ocr(image):
+    # 1. ตัดขอบ 18% (เหมือนเดิม เพื่อลบ HDPE)
     width, height = image.size
-    left = (width * crop_percent) / 100
-    top = (height * crop_percent) / 100
-    right = width - left
-    bottom = height - top
-    return image.crop((left, top, right, bottom))
+    crop_val = 0.18
+    image = image.crop((width*crop_val, height*crop_val, width*(1-crop_val), height*(1-crop_val)))
+    
+    # 2. [สำคัญมาก] ขยายภาพ 3 เท่า (Upscale)
+    # การขยายช่วยให้รอยหยัก W และขา K ชัดขึ้นมาก
+    new_size = (image.width * 3, image.height * 3)
+    image = image.resize(new_size, resample=Image.LANCZOS)
+    
+    # 3. แปลงเป็นขาวดำ
+    image = image.convert('L')
+    
+    # 4. [สำคัญมาก] Histogram Equalization
+    # ช่วยกู้รายละเอียดในส่วนเงา (ขาตัว K ที่หายไป) ให้กลับมา
+    image = ImageOps.equalize(image)
+    
+    # 5. เพิ่มความคมชัด (Sharpen) เล็กน้อย
+    image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    
+    # 6. เพิ่ม Contrast ปิดท้าย
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2.0)
+    
+    return image
 
-# --- ฟังก์ชันหลัก: อ่านและคัดกรอง ---
+# --- ฟังก์ชันหลัก ---
 def smart_read(image_pil):
-    # 1. ตัดขอบทิ้งก่อนเลย (กำจัด HDPE, PAT, etc.)
-    img_cropped = crop_center(image_pil, crop_percent=18) 
-    
-    # 2. ทำภาพให้เป็นขาว-ดำ (Binarization) แบบเข้มข้น
-    # เปลี่ยนเป็น Grayscale
-    img_gray = img_cropped.convert('L')
-    
-    # เร่ง Contrast สูงมาก
-    enhancer = ImageEnhance.Contrast(img_gray)
-    img_high_contrast = enhancer.enhance(3.0) 
+    # เตรียมภาพด้วยสูตรใหม่
+    processed_img = enhance_image_for_ocr(image_pil)
     
     candidates = []
 
-    # 3. วนลูปหมุนภาพ 4 ทิศ (0, 90, 180, 270)
+    # วนลูปหมุน 4 ทิศ
     for angle in [0, 90, 180, 270]:
-        # หมุนภาพ
         if angle != 0:
-            rotated_img = img_high_contrast.rotate(-angle, expand=True)
+            # ใช้ expand=True เพื่อไม่ให้ภาพโดนตัดตอนหมุน
+            rotated = processed_img.rotate(-angle, expand=True)
         else:
-            rotated_img = img_high_contrast
+            rotated = processed_img
+            
+        img_np = np.array(rotated)
         
-        # แปลงเป็น numpy
-        img_np = np.array(rotated_img)
-        
-        # อ่านค่า (Allowlist A-Z 0-9)
+        # อ่านค่า
         results = reader.readtext(img_np, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+        full_text = "".join(results).upper()
+        clean_text = re.sub(r'[^A-Z0-9]', '', full_text)
         
-        # รวม text ที่อ่านได้ในมุมนั้นๆ
-        full_text_raw = "".join(results)
-        full_text_upper = full_text_raw.upper()
-        
-        # กรองเอาเฉพาะ A-Z และ 0-9
-        clean_text = re.sub(r'[^A-Z0-9]', '', full_text_upper)
-        
-        # --- ตรวจสอบ Logic ---
-        # ลองหาช่วงที่มี 9 ตัวอักษรเรียงกัน
-        # เนื่องจากบางทีมันอ่านขยะมาติดด้วย เราจะ slide window หา 9 ตัว
+        # 1. ลองหา Pattern 9 ตัวเป๊ะๆ ในข้อความยาวๆ
+        # ใช้ Sliding Window หาช่วงที่เข้าเงื่อนไขเป๊ะที่สุด
         for i in range(len(clean_text) - 8):
             chunk = clean_text[i : i+9]
             if is_valid_pattern(chunk):
-                return chunk # เจอ Pattern ที่ใช่ (ยาว 9, เลข 0 หรือ 2 ตัว) ส่งกลับทันที!
+                return chunk # เจอของดี ส่งกลับเลย
 
-        # กรณีไม่เจอ 9 ตัวเป๊ะๆ แต่เจอ text ยาวๆ เก็บไว้เป็นตัวสำรอง
-        if len(clean_text) >= 8 and len(clean_text) <= 12:
+        # 2. ถ้าไม่เจอเป๊ะ ให้เก็บพวกใกล้เคียงไว้ (8-10 ตัว)
+        if len(clean_text) >= 8 and len(clean_text) <= 10:
             candidates.append(clean_text)
 
-    # ถ้าไม่เจอ Pattern เทพ (9 ตัวเป๊ะ) ให้พยายามเลือกตัวที่ดีที่สุดจากตัวสำรอง
+    # เลือกตัวที่ดีที่สุดจาก Candidates
     if candidates:
-        # ลองวนหาตัวที่มีเลข 2 ตัว หรือ 0 ตัว ในบรรดาตัวสำรอง
-        for cand in candidates:
-             d_count = sum(c.isdigit() for c in cand)
-             if d_count == 2 or d_count == 0:
-                 return cand
-        
-        # ถ้าไม่มีจริงๆ เอาตัวที่ยาวใกล้เคียง 9 สุด
-        return max(candidates, key=len)
+        # กรองหาตัวที่มีเลข 0 หรือ 2 ตัวก่อน
+        priority_candidates = [c for c in candidates if is_valid_pattern(c)]
+        if priority_candidates:
+            return max(priority_candidates, key=len) # เอาตัวที่ยาวสุดในกลุ่มที่ผ่านกฎ
+            
+        # ถ้าไม่มีใครผ่านกฎเลย ให้เอาตัวที่ยาวใกล้ 9 สุด
+        return sorted(candidates, key=lambda x: abs(len(x) - 9))[0]
     
     return None
 
-# --- ส่วนแสดงผลโลโก้ (Fix ขนาด 150x201) ---
+# --- ส่วนแสดงผลโลโก้ (150x201) ---
 try:
     logo = Image.open("banner.png")
     logo_resized = logo.resize((150, 201))
@@ -110,60 +104,52 @@ try:
     with col_logo:
         st.image(logo_resized)
 except FileNotFoundError:
-    st.warning("ไม่พบไฟล์ banner.png")
+    pass
 
-# --- ส่วนเนื้อหาหลัก ---
+# --- UI ---
 st.write("---")
-st.info("ℹ️ กฎเหล็ก: รหัส 9 หลัก (มีตัวเลขได้เพียง 0 หรือ 2 ตัวเท่านั้น) + ตัดขอบรบกวนอัตโนมัติ")
+st.info("ℹ️ Mode: High-Res Upscaling (แก้ปัญหาตัว W และ K)")
 
 tab1, tab2 = st.tabs(["📂 อัปโหลดหลายรูป", "📷 ถ่ายรูป"])
 
-# ================= TAB 1: Batch Upload =================
+# TAB 1
 with tab1:
     uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
-
     if uploaded_files:
-        st.success(f"กำลังสแกน {len(uploaded_files)} รูป...")
+        st.success(f"กำลังประมวลผลละเอียด {len(uploaded_files)} รูป...")
         st.markdown("---")
-        
         for i, uploaded_file in enumerate(uploaded_files):
             col1, col2 = st.columns([1, 3])
             image = Image.open(uploaded_file)
-
             with col1:
                 st.image(image, width=100, caption=f"รูปที่ {i+1}")
-
             with col2:
-                with st.spinner('กำลังวิเคราะห์...'):
+                with st.spinner('Scanning...'):
                     final_code = smart_read(image)
-                    
                     if final_code:
                         st.code(final_code, language=None)
-                        
-                        # ตรวจสอบความถูกต้องเพื่อแสดงสีสถานะ
                         d_c = sum(c.isdigit() for c in final_code)
                         if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                            st.caption("✅ ผ่านเงื่อนไข (9 หลัก, เลข 0/2 ตัว)")
+                            st.caption("✅ ครบถ้วนถูกต้อง")
                         else:
-                            st.caption(f"⚠️ รูปแบบไม่ตรงเงื่อนไข 100% (ยาว {len(final_code)}, เลข {d_c} ตัว)")
+                            st.caption(f"⚠️ ตรวจสอบ: ยาว {len(final_code)}, เลข {d_c} ตัว")
                     else:
-                        st.error("❌ อ่านค่าไม่ได้")
+                        st.error("❌ อ่านไม่ออก")
             st.markdown("---")
 
-# ================= TAB 2: Camera =================
+# TAB 2
 with tab2:
-    camera_image = st.camera_input("ถ่ายรูปฝาขวด")
+    camera_image = st.camera_input("ถ่ายรูป")
     if camera_image is not None:
         image = Image.open(camera_image)
-        st.write("ผลลัพธ์:")
-        with st.spinner('กำลังวิเคราะห์...'):
+        with st.spinner('Scanning...'):
             final_code = smart_read(image)
             if final_code:
                 st.code(final_code, language=None)
                 d_c = sum(c.isdigit() for c in final_code)
                 if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                    st.caption("✅ ผ่านเงื่อนไข")
+                    st.caption("✅ ครบถ้วนถูกต้อง")
                 else:
-                    st.caption(f"⚠️ ตรวจสอบอีกครั้ง (ยาว {len(final_code)}, เลข {d_c} ตัว)")
+                    st.caption(f"⚠️ ตรวจสอบ: ยาว {len(final_code)}, เลข {d_c} ตัว")
             else:
                 st.warning("ไม่พบรหัส")
