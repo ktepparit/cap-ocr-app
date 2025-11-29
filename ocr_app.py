@@ -3,7 +3,7 @@ import easyocr
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import re
-import gc 
+import gc
 
 # --- ตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="Kratingdaeng OCR Scanners", page_icon="⚡", layout="centered")
@@ -12,54 +12,46 @@ try:
     # --- โหลดโมเดล (Cache) ---
     @st.cache_resource
     def load_model():
+        # โหลดโมเดลภาษาอังกฤษ
         return easyocr.Reader(['en'], gpu=False, quantize=True)
 
-    with st.spinner('กำลังเตรียมระบบ (V6: Focus Middle Strip)...'):
+    with st.spinner('กำลังโหลดระบบ V7 (Line-by-Line Intelligence)...'):
         reader = load_model()
 
 except Exception as e:
-    st.error(f"❌ System Load Error: {e}")
+    st.error(f"❌ System Error: {e}")
     st.stop()
 
-# --- Logic: ตรวจสอบ 12 หลัก ---
-def is_valid_pattern(text):
-    return len(text) == 12
+# --- Logic: ตรวจสอบ 12 หลัก (A-Z, 0-9) ---
+def clean_and_check(text):
+    # กรองเฉพาะ A-Z และ 0-9
+    cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
+    # เช็คความยาว
+    if len(cleaned) == 12:
+        return cleaned, True
+    return cleaned, False
 
-# --- Preprocessing (สูตรใหม่: เจาะจงพื้นที่ตรงกลาง) ---
+# --- Preprocessing (ปรับแสงให้ชัด แต่ไม่ตัดภาพเยอะ) ---
 def process_image(image):
-    # 1. Resize เป็น 1200px (ความละเอียดสูงขึ้นเพื่อให้อ่าน W ชัดๆ)
+    # 1. Resize เป็น 1200px (ความละเอียดกำลังดีสำหรับอ่าน Text)
     target_width = 1200
     if image.width != target_width:
         w_percent = (target_width / float(image.width))
         h_size = int((float(image.height) * float(w_percent)))
         image = image.resize((target_width, h_size), resample=Image.LANCZOS)
     
-    # 2. [สำคัญมาก] ตัดส่วนบนและล่างทิ้งเยอะๆ (Vertical Crop)
-    # ตัดบน 28% และล่าง 28% ทิ้ง -> เหลือพื้นที่ตรงกลางแค่ 44%
-    # วิธีนี้จะกำจัดคำว่า "P Bev" (ด้านบน) และตัวเลขนูน (ด้านล่าง) ออกไปเลย
+    # 2. ตัดขอบทิ้งแค่นิดเดียว (5%) เพื่อกำจัดขอบฝาส่วนโค้ง
     w, h = image.size
-    top_crop = h * 0.28
-    bottom_crop = h * 0.72 # (100% - 28%)
+    crop_margin = 0.05
+    image = image.crop((w*crop_margin, h*crop_margin, w*(1-crop_margin), h*(1-crop_margin)))
     
-    # ตัดซ้ายขวานิดหน่อย (10%)
-    left_crop = w * 0.10
-    right_crop = w * 0.90
-    
-    image = image.crop((left_crop, top_crop, right_crop, bottom_crop))
-    
-    # 3. ขาวดำ + เร่ง Contrast จัดๆ
+    # 3. แปลงเป็นขาวดำ + Equalize (ช่วยกู้รายละเอียดในเงา)
     image = image.convert('L')
+    image = ImageOps.equalize(image)
     
-    # ใช้ UnsharpMask เพื่อเน้นขอบตัวหนังสือให้คมกริบ (แก้ W อ่านผิด)
-    image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=200, threshold=3))
-    
-    # เร่งความสว่างและ Contrast ให้พื้นหลังหายไป
+    # 4. เพิ่ม Contrast (1.5 เท่า) เพื่อให้ตัวหนังสือเด้งออกมา
     enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(3.0) # เร่ง 3 เท่า
-    
-    # เพิ่มความเข้ม (Thresholding แบบบ้านๆ) เพื่อให้เส้นบางๆ ของตัว W ชัดขึ้น
-    # โดยการทำให้ส่วนที่ไม่ใช่สีขาว กลายเป็นดำให้หมด
-    image = image.point(lambda p: p if p > 160 else 0)
+    image = enhancer.enhance(1.5)
     
     return image
 
@@ -67,44 +59,60 @@ def process_image(image):
 def smart_read(image_pil):
     try:
         processed_img = process_image(image_pil)
+        
+        # แสดงภาพที่ระบบเห็น (เพื่อการ Debug)
+        st.image(processed_img, caption="ภาพที่ AI มองเห็น (Processed)", width=200)
+
         candidates = []
 
-        # วนลูปหมุน 4 ทิศ (สำคัญมากสำหรับฝากลับหัว)
+        # วนลูปหมุน 4 ทิศ
         for angle in [0, 90, 180, 270]:
             if angle != 0:
-                rotated = processed_img.rotate(-angle, expand=True, fillcolor=255)
+                rotated = processed_img.rotate(-angle, expand=True, fillcolor=128)
             else:
                 rotated = processed_img
                 
             img_np = np.array(rotated)
             
-            # อ่านค่า
-            # paragraph=True อาจช่วยรวมคำที่ขาดตอนได้
-            results = reader.readtext(img_np, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+            # อ่านค่าแยกบรรทัด (detail=0 จะได้เป็น List ของข้อความ)
+            # ไม่ใช้ allowlist ตรงนี้ เพราะอยากรู้ว่ามันอ่านอะไรออกมาบ้างก่อนคัดกรอง
+            results = reader.readtext(img_np, detail=0)
             
-            full_text = "".join(results).upper()
-            clean_text = re.sub(r'[^A-Z0-9]', '', full_text)
+            # --- กลยุทธ์ใหม่: ตรวจสอบทีละบรรทัด (Line-by-Line) ---
+            found_perfect_match = False
+            for line in results:
+                cleaned_line, is_12_chars = clean_and_check(line)
+                
+                # ถ้าเจอบรรทัดที่มี 12 ตัวเป๊ะๆ (เช่น KY7KLWX6RM46) เอาเลย!
+                # บรรทัดที่เป็น "P Bev" (4 ตัว) หรือ "21" (2 ตัว) จะถูกปัดตกไปตรงนี้
+                if is_12_chars:
+                    del img_np, rotated
+                    gc.collect()
+                    return cleaned_line # เจอ Jackpot จบงานทันที
+
+                # เก็บตัวเลือกที่ใกล้เคียงไว้ (10-14 ตัว) เผื่อไม่มีอันไหนเป๊ะ
+                if 10 <= len(cleaned_line) <= 14:
+                    candidates.append(cleaned_line)
             
+            # ถ้าไม่เจอบรรทัดเดียวเป๊ะๆ ลองเอาทุกบรรทัดมาต่อกัน (เผื่อมันอ่านขาดตอน)
+            full_text_joined = "".join(results)
+            cleaned_joined, _ = clean_and_check(full_text_joined)
+            
+            # Sliding Window หา 12 ตัวในข้อความยาวๆ
+            if len(cleaned_joined) >= 12:
+                for i in range(len(cleaned_joined) - 11):
+                    chunk = cleaned_joined[i : i+12]
+                    # กรองว่าเป็น A-Z0-9 ล้วนๆ
+                    if len(chunk) == 12:
+                         # เก็บไว้เป็น candidate แบบความหวังสุดท้าย
+                         candidates.append(chunk)
+
             del img_np, rotated
-            gc.collect() 
-            
-            # 1. หา 12 ตัวเป๊ะ
-            if len(clean_text) >= 12:
-                # Sliding Window หาช่วงที่ดีที่สุด
-                for i in range(len(clean_text) - 11):
-                    chunk = clean_text[i : i+12]
-                    # กรองเบื้องต้น: รหัสที่ดีมักจะไม่มีตัวเลขติดกันยาวเหยียดเกินไป (Optional logic)
-                    if is_valid_pattern(chunk):
-                        return chunk
+            gc.collect()
 
-            # เก็บไว้เป็นตัวเลือก
-            if len(clean_text) >= 10 and len(clean_text) <= 15:
-                candidates.append(clean_text)
-
-        gc.collect()
-        
-        # ถ้าหาเป๊ะๆ ไม่เจอ ให้เอาตัวที่ยาว 12 หรือใกล้เคียงที่สุด
+        # สรุปผล: ถ้าไม่เจอเป๊ะๆ ให้เอาตัวที่ดีที่สุดใน Candidates
         if candidates:
+            # เรียงลำดับ หาตัวที่ใกล้ 12 ตัวที่สุด
             best_guess = sorted(candidates, key=lambda x: abs(len(x) - 12))[0]
             return best_guess
         
@@ -121,7 +129,7 @@ try:
         pass 
         
     st.write("---")
-    st.info("ℹ️ V6: Focus Middle Strip (ตัดรอยนูนบนล่างทิ้ง)")
+    st.info("ℹ️ V7: ระบบแยกบรรทัดอัจฉริยะ (แยก P Bev ออกจากรหัส)")
 
     tab1, tab2 = st.tabs(["📂 อัปโหลดหลายรูป", "📷 ถ่ายรูป"])
 
@@ -136,20 +144,21 @@ try:
                 try:
                     image = Image.open(uploaded_file)
                     with col1:
-                        st.image(image, width=100, caption=f"Img {i+1}")
+                        st.image(image, width=100, caption=f"Original {i+1}")
                     with col2:
                         with st.spinner('Scanning...'):
                             final_code = smart_read(image)
+                            
                             if final_code and "Error" not in final_code:
                                 st.code(final_code, language=None)
                                 if len(final_code) == 12:
                                     st.caption("✅ ครบ 12 หลัก")
                                 else:
-                                    st.caption(f"⚠️ ได้ {len(final_code)} หลัก")
+                                    st.caption(f"⚠️ ได้ {len(final_code)} หลัก: {final_code}")
                             elif final_code:
                                 st.error(final_code)
                             else:
-                                st.error("❌ ไม่พบรหัส")
+                                st.error("❌ ไม่พบรหัส (ลองปรับแสงหรือมุมกล้อง)")
                 except Exception as e:
                     st.error(f"File Error: {e}")
                 st.markdown("---")
