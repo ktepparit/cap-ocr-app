@@ -11,7 +11,7 @@ with st.sidebar:
     st.success("Model: gemini-2.0-flash")
     
     # ⚠️ ใส่ API Key ของคุณตรงนี้ (หรือจะกรอกหน้าเว็บก็ได้)
-    default_api_key = "" 
+    default_api_key = "AIzaSyCmWmCTFIZ31hNPYdQMjwGfEzP9SxJnl6o" 
     
     api_key_input = st.text_input("ใส่ Google API Key", value=default_api_key, type="password")
     api_key = api_key_input if api_key_input else default_api_key
@@ -115,3 +115,4 @@ try:
 
 except Exception as main_e:
     st.error(f"Critical: {main_e}")
+
