@@ -8,7 +8,7 @@ st.set_page_config(page_title="Kratingdaeng AI Scanner", page_icon="⚡", layout
 # --- ส่วนใส่ API Key ---
 with st.sidebar:
     st.header("🔑 ตั้งค่าระบบ")
-    st.success("Model: gemini-2.5-flash") # เปลี่ยนมาใช้ตัว Flash ปกติ
+    st.success("Model: gemini-2.5-pro") # ใช้ตัว Pro รุ่นฉลาดสุด
     
     default_api_key = "AIzaSyCmWmCTFIZ31hNPYdQMjwGfEzP9SxJnl6o" 
     api_key_input = st.text_input("ใส่ Google API Key", value=default_api_key, type="password")
@@ -23,25 +23,28 @@ def gemini_vision_scan(image_pil, key):
         # ตั้งค่าโมเดล
         genai.configure(api_key=key)
         
-        # ✅ เปลี่ยนมาใช้ gemini-2.5-flash ตามที่ขอ
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # ✅ ใช้โมเดล gemini-2.5-pro ตามที่ขอ
+        model = genai.GenerativeModel('gemini-2.5-pro')
 
-        # --- Prompt ที่ยังคงความฉลาดในการแก้คำผิด ---
+        # --- Super Prompt สำหรับรุ่น Pro (สั่งให้คิดวิเคราะห์) ---
         prompt = """
-        Analyze the image of the bottle cap to extract the 12-character serial code.
+        Analyze the image of the bottle cap to extract the 12-character serial code printed on the inside.
         
-        CRITICAL INSTRUCTIONS FOR DOT-MATRIX FONT:
-        1. **Context:** The text is printed with dots. Connections might be faint.
-        2. **Common Errors to Fix:**
-           - **'7' vs 'Z':** The number '7' often looks like 'Z' in this font. If in doubt, choose '7'.
-           - **'6' vs 'G':** The number '6' often looks like 'G'. Check if the loop is closed.
-           - **'W' vs 'I':** 'W' is wide. Do not mistake it for 'I'.
-           - **'M' vs 'H':** Check the middle part of 'M'.
-        
-        3. **Format:** The code is EXACTLY 12 alphanumeric characters (A-Z, 0-9).
-        4. **Ignore:** "P Bev", "21", "HDPE", recycling symbols.
+        This is a difficult OCR task involving Dot-Matrix fonts. You must use your advanced reasoning to correct common OCR errors based on the context of the alphanumeric code.
 
-        OUTPUT: Return ONLY the 12-character code text.
+        CRITICAL CORRECTION RULES:
+        1. **'7' vs 'Z':** The character '7' often has a hooked top in this font, which makes it look like 'Z'. Unless it is unmistakably 'Z', interpret it as '7'.
+        2. **'6' vs 'G':** The number '6' often has a gap, looking like 'G'. Check the curvature carefully.
+        3. **'W' vs 'I' or 'U':** The letter 'W' is composed of faint dots and can look like 'I', 'U', or 'V'. Look for the width and the faint center dots.
+        4. **'M' vs 'H':** Similar to 'W', look for the faint center V-shape of 'M'.
+        
+        REQUIREMENTS:
+        - The code is EXACTLY 12 alphanumeric characters (A-Z, 0-9).
+        - Ignore text like "P Bev", "21", "HDPE", "07", or recycling symbols.
+        - Do not include spaces or labels.
+
+        OUTPUT:
+        Return ONLY the 12-character code string.
         """
 
         # ส่งรูปและคำสั่งไป
@@ -59,7 +62,7 @@ try:
         pass 
         
     st.title("⚡ Kratingdaeng AI Scanner")
-    st.caption("Powered by: Gemini 2.5 Flash ⚡") 
+    st.caption("Powered by: Gemini 2.5 Pro (High Reasoning) 🧠") 
     st.write("---")
 
     if api_key:
@@ -69,7 +72,7 @@ try:
         with tab1:
             uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
             if uploaded_files:
-                st.success(f"ส่งให้ AI (2.5 Flash) วิเคราะห์ {len(uploaded_files)} รูป...")
+                st.success(f"ส่งให้ AI (2.5 Pro) วิเคราะห์ {len(uploaded_files)} รูป...")
                 st.markdown("---")
                 for i, uploaded_file in enumerate(uploaded_files):
                     col1, col2 = st.columns([1, 3])
@@ -77,13 +80,13 @@ try:
                     with col1:
                         st.image(image, width=100, caption=f"Img {i+1}")
                     with col2:
-                        with st.spinner('กำลังอ่าน...'):
+                        with st.spinner('AI กำลังใช้ความคิด (Pro)...'):
                             code = gemini_vision_scan(image, api_key)
                             
                             if "Error" in code:
                                 st.error(code)
                                 if "429" in code:
-                                    st.warning("⚠️ โควต้าเต็มอีกแล้ว ลองเปลี่ยนเป็น 'gemini-1.5-flash' (ตัวเสถียรสุด) แทนครับ")
+                                    st.warning("⚠️ โมเดล Pro โควต้าเต็มเร็วมากครับ ถ้าใช้ต่อไม่ได้ ให้ลองกลับไปใช้ 'gemini-1.5-flash'")
                             else:
                                 clean_code = code.replace(" ", "").replace("\n", "")
                                 st.code(clean_code, language=None)
@@ -99,7 +102,7 @@ try:
             camera_image = st.camera_input("ถ่ายรูป")
             if camera_image is not None:
                 image = Image.open(camera_image)
-                with st.spinner('กำลังอ่าน...'):
+                with st.spinner('AI กำลังใช้ความคิด (Pro)...'):
                     code = gemini_vision_scan(image, api_key)
                     if "Error" in code:
                         st.error(code)
