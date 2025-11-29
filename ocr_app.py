@@ -10,7 +10,7 @@ with st.sidebar:
     st.header("🔑 ตั้งค่าระบบ")
     st.success("Model: gemini-2.5-flash-image") # ใช้รุ่นพิเศษสำหรับรูปภาพ
     
-    default_api_key = "" 
+    default_api_key = "AIzaSyCmWmCTFIZ31hNPYdQMjwGfEzP9SxJnl6o" 
     api_key_input = st.text_input("ใส่ Google API Key", value=default_api_key, type="password")
     api_key = api_key_input if api_key_input else default_api_key
     
@@ -115,3 +115,4 @@ try:
 
 except Exception as main_e:
     st.error
+
