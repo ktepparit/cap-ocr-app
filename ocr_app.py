@@ -60,7 +60,6 @@ def gemini_vision_scan(image_pil, key):
         return f"Error: {str(e)}"
 
 # --- ส่วนแสดงผล UI ---
-try:
     try:
         st.image("banner.png", width=150)
     except:
@@ -121,3 +120,4 @@ try:
 
 except Exception as main_e:
     st.error(f"Critical: {main_e}")
+
