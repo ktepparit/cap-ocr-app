@@ -10,7 +10,6 @@ st.set_page_config(page_title="Kratingdaeng OCR Scanners", page_icon="⚡", layo
 # --- โหลดโมเดล ---
 @st.cache_resource
 def load_model():
-    # allowlist ยังคงใช้เพื่อจำกัดขอบเขตการเดาของ AI
     return easyocr.Reader(['en'], gpu=False)
 
 with st.spinner('กำลังเตรียมระบบ...'):
@@ -21,77 +20,77 @@ def is_valid_pattern(text):
     if len(text) != 9:
         return False
     digit_count = sum(c.isdigit() for c in text)
+    # ต้องมีตัวเลข 0 ตัว หรือ 2 ตัว เท่านั้น
     return digit_count == 0 or digit_count == 2
 
-# --- Preprocessing ขั้นเทพ (แก้ W->U, K->I) ---
+# --- Preprocessing (สูตรใหม่: Smart Resize) ---
 def enhance_image_for_ocr(image):
-    # 1. ตัดขอบ 18% (เหมือนเดิม เพื่อลบ HDPE)
+    # 1. ตัดขอบ 18% (ลบ HDPE/ขอบฝา)
     width, height = image.size
     crop_val = 0.18
     image = image.crop((width*crop_val, height*crop_val, width*(1-crop_val), height*(1-crop_val)))
     
-    # 2. [สำคัญมาก] ขยายภาพ 3 เท่า (Upscale)
-    # การขยายช่วยให้รอยหยัก W และขา K ชัดขึ้นมาก
-    new_size = (image.width * 3, image.height * 3)
-    image = image.resize(new_size, resample=Image.LANCZOS)
+    # 2. [แก้จุดที่ทำแอพพัง] Smart Resize
+    # บังคับความกว้างเป็น 1200px (ความละเอียดระดับ HD)
+    # ใหญ่พอที่จะเห็นหยักตัว W แต่ไม่ใหญ่จน Server ระเบิด
+    target_width = 1200
+    if image.width != target_width:
+        w_percent = (target_width / float(image.width))
+        h_size = int((float(image.height) * float(w_percent)))
+        image = image.resize((target_width, h_size), resample=Image.LANCZOS)
     
     # 3. แปลงเป็นขาวดำ
     image = image.convert('L')
     
-    # 4. [สำคัญมาก] Histogram Equalization
-    # ช่วยกู้รายละเอียดในส่วนเงา (ขาตัว K ที่หายไป) ให้กลับมา
+    # 4. [แก้ตัว K อ่านเป็น I] Histogram Equalization
+    # เกลี่ยแสงให้สม่ำเสมอ เพื่อกู้รายละเอียดในเงา
     image = ImageOps.equalize(image)
     
-    # 5. เพิ่มความคมชัด (Sharpen) เล็กน้อย
-    image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-    
-    # 6. เพิ่ม Contrast ปิดท้าย
+    # 5. เพิ่ม Contrast (แต่ไม่เยอะเกินไปจนเส้นขาด)
     enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(2.0)
+    image = enhancer.enhance(1.8)
     
     return image
 
 # --- ฟังก์ชันหลัก ---
 def smart_read(image_pil):
-    # เตรียมภาพด้วยสูตรใหม่
+    # เตรียมภาพ
     processed_img = enhance_image_for_ocr(image_pil)
     
     candidates = []
 
-    # วนลูปหมุน 4 ทิศ
+    # วนลูปหมุน 4 ทิศ (0, 90, 180, 270)
     for angle in [0, 90, 180, 270]:
         if angle != 0:
-            # ใช้ expand=True เพื่อไม่ให้ภาพโดนตัดตอนหมุน
             rotated = processed_img.rotate(-angle, expand=True)
         else:
             rotated = processed_img
             
         img_np = np.array(rotated)
         
-        # อ่านค่า
+        # อ่านค่า (Allowlist)
         results = reader.readtext(img_np, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
         full_text = "".join(results).upper()
         clean_text = re.sub(r'[^A-Z0-9]', '', full_text)
         
-        # 1. ลองหา Pattern 9 ตัวเป๊ะๆ ในข้อความยาวๆ
-        # ใช้ Sliding Window หาช่วงที่เข้าเงื่อนไขเป๊ะที่สุด
+        # 1. หา Pattern 9 ตัวเป๊ะ
         for i in range(len(clean_text) - 8):
             chunk = clean_text[i : i+9]
             if is_valid_pattern(chunk):
                 return chunk # เจอของดี ส่งกลับเลย
 
-        # 2. ถ้าไม่เจอเป๊ะ ให้เก็บพวกใกล้เคียงไว้ (8-10 ตัว)
+        # 2. เก็บตัวสำรอง (8-10 ตัว)
         if len(clean_text) >= 8 and len(clean_text) <= 10:
             candidates.append(clean_text)
 
     # เลือกตัวที่ดีที่สุดจาก Candidates
     if candidates:
-        # กรองหาตัวที่มีเลข 0 หรือ 2 ตัวก่อน
+        # กรองหาตัวที่ผ่านเงื่อนไขเลข 0/2 ตัว
         priority_candidates = [c for c in candidates if is_valid_pattern(c)]
         if priority_candidates:
-            return max(priority_candidates, key=len) # เอาตัวที่ยาวสุดในกลุ่มที่ผ่านกฎ
+            return max(priority_candidates, key=len)
             
-        # ถ้าไม่มีใครผ่านกฎเลย ให้เอาตัวที่ยาวใกล้ 9 สุด
+        # ถ้าไม่มีจริงๆ เอาตัวที่ยาวใกล้ 9 สุด
         return sorted(candidates, key=lambda x: abs(len(x) - 9))[0]
     
     return None
@@ -108,15 +107,15 @@ except FileNotFoundError:
 
 # --- UI ---
 st.write("---")
-st.info("ℹ️ Mode: High-Res Upscaling (แก้ปัญหาตัว W และ K)")
+st.info("ℹ️ Mode: Smart HD (แก้ปัญหาแอพพัง + อ่าน W/K แม่นยำ)")
 
 tab1, tab2 = st.tabs(["📂 อัปโหลดหลายรูป", "📷 ถ่ายรูป"])
 
-# TAB 1
+# TAB 1: Batch
 with tab1:
     uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
     if uploaded_files:
-        st.success(f"กำลังประมวลผลละเอียด {len(uploaded_files)} รูป...")
+        st.success(f"กำลังประมวลผล {len(uploaded_files)} รูป...")
         st.markdown("---")
         for i, uploaded_file in enumerate(uploaded_files):
             col1, col2 = st.columns([1, 3])
@@ -130,14 +129,14 @@ with tab1:
                         st.code(final_code, language=None)
                         d_c = sum(c.isdigit() for c in final_code)
                         if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                            st.caption("✅ ครบถ้วนถูกต้อง")
+                            st.caption("✅ ถูกต้อง")
                         else:
-                            st.caption(f"⚠️ ตรวจสอบ: ยาว {len(final_code)}, เลข {d_c} ตัว")
+                            st.caption(f"⚠️ ตรวจสอบ: {final_code}")
                     else:
                         st.error("❌ อ่านไม่ออก")
             st.markdown("---")
 
-# TAB 2
+# TAB 2: Camera
 with tab2:
     camera_image = st.camera_input("ถ่ายรูป")
     if camera_image is not None:
@@ -148,8 +147,8 @@ with tab2:
                 st.code(final_code, language=None)
                 d_c = sum(c.isdigit() for c in final_code)
                 if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                    st.caption("✅ ครบถ้วนถูกต้อง")
+                    st.caption("✅ ถูกต้อง")
                 else:
-                    st.caption(f"⚠️ ตรวจสอบ: ยาว {len(final_code)}, เลข {d_c} ตัว")
+                    st.caption(f"⚠️ ตรวจสอบ: {final_code}")
             else:
                 st.warning("ไม่พบรหัส")
