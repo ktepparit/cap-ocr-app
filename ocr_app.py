@@ -1,154 +1,170 @@
 import streamlit as st
 import easyocr
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from PIL import Image, ImageEnhance, ImageOps
 import re
+import gc # ช่วยเคลียร์ RAM
 
 # --- ตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="Kratingdaeng OCR Scanners", page_icon="⚡", layout="centered")
 
-# --- โหลดโมเดล ---
-@st.cache_resource
-def load_model():
-    return easyocr.Reader(['en'], gpu=False)
+# ใช้ Try-Except ดักจับ Error ตั้งแต่เริ่มโหลด
+try:
+    # --- โหลดโมเดล (Cache) ---
+    @st.cache_resource
+    def load_model():
+        # quantize=True ช่วยลดการกิน RAM
+        return easyocr.Reader(['en'], gpu=False, quantize=True)
 
-with st.spinner('กำลังเตรียมระบบ...'):
-    reader = load_model()
+    with st.spinner('กำลังเตรียมระบบ (v5: รองรับรหัส 12 หลัก)...'):
+        reader = load_model()
 
-# --- Logic: ตรวจสอบเงื่อนไข 9 หลัก + เลข 0/2 ตัว ---
+except Exception as e:
+    st.error(f"❌ เกิดข้อผิดพลาดตอนโหลดระบบ: {e}")
+    st.stop()
+
+# --- Logic ใหม่: ตรวจสอบเงื่อนไข 12 หลักเท่านั้น ---
 def is_valid_pattern(text):
-    if len(text) != 9:
-        return False
-    digit_count = sum(c.isdigit() for c in text)
-    # ต้องมีตัวเลข 0 ตัว หรือ 2 ตัว เท่านั้น
-    return digit_count == 0 or digit_count == 2
+    # เงื่อนไขเดียวคือ ต้องยาว 12 ตัวอักษรเป๊ะๆ
+    # (Regex ด้านล่างกรองให้เหลือแค่ A-Z และ 0-9 แล้ว)
+    return len(text) == 12
 
-# --- Preprocessing (สูตรใหม่: Smart Resize) ---
+# --- Preprocessing (ปรับปรุงสำหรับการอ่าน 12 หลัก) ---
 def enhance_image_for_ocr(image):
-    # 1. ตัดขอบ 18% (ลบ HDPE/ขอบฝา)
+    # 1. ลดการตัดขอบลง (จาก 18% เหลือ 12%) 
+    # เพราะรหัส 12 หลักจะยาวเกือบถึงขอบฝา ถ้าตัดเยอะจะแหว่ง
     width, height = image.size
-    crop_val = 0.18
+    crop_val = 0.12 
     image = image.crop((width*crop_val, height*crop_val, width*(1-crop_val), height*(1-crop_val)))
     
-    # 2. [แก้จุดที่ทำแอพพัง] Smart Resize
-    # บังคับความกว้างเป็น 1200px (ความละเอียดระดับ HD)
-    # ใหญ่พอที่จะเห็นหยักตัว W แต่ไม่ใหญ่จน Server ระเบิด
-    target_width = 1200
+    # 2. Smart Resize (รักษาความกว้างไว้ที่ประมาณ 1000px)
+    # ขนาดนี้กำลังดีสำหรับ 12 ตัวอักษร และไม่กิน RAM เกินไป
+    target_width = 1000 
     if image.width != target_width:
         w_percent = (target_width / float(image.width))
         h_size = int((float(image.height) * float(w_percent)))
         image = image.resize((target_width, h_size), resample=Image.LANCZOS)
     
-    # 3. แปลงเป็นขาวดำ
+    # 3. ขาวดำ + Equalize + Contrast (สูตรเดิมที่ใช้ได้ดี)
     image = image.convert('L')
-    
-    # 4. [แก้ตัว K อ่านเป็น I] Histogram Equalization
-    # เกลี่ยแสงให้สม่ำเสมอ เพื่อกู้รายละเอียดในเงา
-    image = ImageOps.equalize(image)
-    
-    # 5. เพิ่ม Contrast (แต่ไม่เยอะเกินไปจนเส้นขาด)
+    image = ImageOps.equalize(image) # เกลี่ยแสงเงา
     enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(1.8)
+    image = enhancer.enhance(1.5) # เพิ่ม Contrast พอประมาณ
     
     return image
 
-# --- ฟังก์ชันหลัก ---
+# --- ฟังก์ชันหลัก (ปรับจูนให้หา 12 หลัก) ---
 def smart_read(image_pil):
-    # เตรียมภาพ
-    processed_img = enhance_image_for_ocr(image_pil)
-    
-    candidates = []
+    try:
+        processed_img = enhance_image_for_ocr(image_pil)
+        candidates = []
 
-    # วนลูปหมุน 4 ทิศ (0, 90, 180, 270)
-    for angle in [0, 90, 180, 270]:
-        if angle != 0:
-            rotated = processed_img.rotate(-angle, expand=True)
-        else:
-            rotated = processed_img
-            
-        img_np = np.array(rotated)
-        
-        # อ่านค่า (Allowlist)
-        results = reader.readtext(img_np, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
-        full_text = "".join(results).upper()
-        clean_text = re.sub(r'[^A-Z0-9]', '', full_text)
-        
-        # 1. หา Pattern 9 ตัวเป๊ะ
-        for i in range(len(clean_text) - 8):
-            chunk = clean_text[i : i+9]
-            if is_valid_pattern(chunk):
-                return chunk # เจอของดี ส่งกลับเลย
-
-        # 2. เก็บตัวสำรอง (8-10 ตัว)
-        if len(clean_text) >= 8 and len(clean_text) <= 10:
-            candidates.append(clean_text)
-
-    # เลือกตัวที่ดีที่สุดจาก Candidates
-    if candidates:
-        # กรองหาตัวที่ผ่านเงื่อนไขเลข 0/2 ตัว
-        priority_candidates = [c for c in candidates if is_valid_pattern(c)]
-        if priority_candidates:
-            return max(priority_candidates, key=len)
-            
-        # ถ้าไม่มีจริงๆ เอาตัวที่ยาวใกล้ 9 สุด
-        return sorted(candidates, key=lambda x: abs(len(x) - 9))[0]
-    
-    return None
-
-# --- ส่วนแสดงผลโลโก้ (150x201) ---
-try:
-    logo = Image.open("banner.png")
-    logo_resized = logo.resize((150, 201))
-    col_logo, col_space = st.columns([1, 2])
-    with col_logo:
-        st.image(logo_resized)
-except FileNotFoundError:
-    pass
-
-# --- UI ---
-st.write("---")
-st.info("ℹ️ Mode: Smart HD (แก้ปัญหาแอพพัง + อ่าน W/K แม่นยำ)")
-
-tab1, tab2 = st.tabs(["📂 อัปโหลดหลายรูป", "📷 ถ่ายรูป"])
-
-# TAB 1: Batch
-with tab1:
-    uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
-    if uploaded_files:
-        st.success(f"กำลังประมวลผล {len(uploaded_files)} รูป...")
-        st.markdown("---")
-        for i, uploaded_file in enumerate(uploaded_files):
-            col1, col2 = st.columns([1, 3])
-            image = Image.open(uploaded_file)
-            with col1:
-                st.image(image, width=100, caption=f"รูปที่ {i+1}")
-            with col2:
-                with st.spinner('Scanning...'):
-                    final_code = smart_read(image)
-                    if final_code:
-                        st.code(final_code, language=None)
-                        d_c = sum(c.isdigit() for c in final_code)
-                        if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                            st.caption("✅ ถูกต้อง")
-                        else:
-                            st.caption(f"⚠️ ตรวจสอบ: {final_code}")
-                    else:
-                        st.error("❌ อ่านไม่ออก")
-            st.markdown("---")
-
-# TAB 2: Camera
-with tab2:
-    camera_image = st.camera_input("ถ่ายรูป")
-    if camera_image is not None:
-        image = Image.open(camera_image)
-        with st.spinner('Scanning...'):
-            final_code = smart_read(image)
-            if final_code:
-                st.code(final_code, language=None)
-                d_c = sum(c.isdigit() for c in final_code)
-                if len(final_code) == 9 and (d_c == 0 or d_c == 2):
-                    st.caption("✅ ถูกต้อง")
-                else:
-                    st.caption(f"⚠️ ตรวจสอบ: {final_code}")
+        # หมุน 4 ทิศ (จำเป็นมากสำหรับฝาที่ถ่ายกลับหัว)
+        for angle in [0, 90, 180, 270]:
+            if angle != 0:
+                rotated = processed_img.rotate(-angle, expand=True)
             else:
-                st.warning("ไม่พบรหัส")
+                rotated = processed_img
+                
+            img_np = np.array(rotated)
+            
+            # อ่านค่า (Allowlist A-Z, 0-9)
+            results = reader.readtext(img_np, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+            full_text = "".join(results).upper()
+            # กรองขยะทิ้ง เหลือแค่ตัวอักษรและตัวเลข
+            clean_text = re.sub(r'[^A-Z0-9]', '', full_text)
+            
+            # เคลียร์เมมโมรี่
+            del img_np
+            del rotated
+            gc.collect() 
+            
+            # --- ค้นหา Pattern 12 ตัวอักษร ---
+            # เนื่องจากมันอาจจะอ่านตัวอักษรนูนอื่นๆ ติดมาด้วย
+            # เราจะใช้ "หน้าต่าง" ขนาด 12 ตัว เลื่อนหาไปเรื่อยๆ
+            if len(clean_text) >= 12:
+                for i in range(len(clean_text) - 11):
+                    chunk = clean_text[i : i+12]
+                    if is_valid_pattern(chunk):
+                        # เจอ 12 ตัวเป๊ะๆ ส่งกลับทันที!
+                        return chunk
+
+            # ถ้าไม่เจอ 12 เป๊ะๆ ให้เก็บข้อความที่ยาวใกล้เคียงไว้ (10-14 ตัว)
+            if len(clean_text) >= 10 and len(clean_text) <= 14:
+                candidates.append(clean_text)
+
+        gc.collect() # เคลียร์ RAM ก่อนจบ
+        
+        # ถ้าวนครบ 4 ทิศแล้วไม่เจอ 12 ตัวเป๊ะๆ เลย
+        if candidates:
+            # พยายามเลือกตัวที่ใกล้ 12 ตัวที่สุด
+            best_guess = sorted(candidates, key=lambda x: abs(len(x) - 12))[0]
+            return best_guess
+        
+        return None
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# --- ส่วนแสดงผล ---
+try:
+    # โหลดโลโก้
+    try:
+        st.image("banner.png", width=150)
+    except:
+        pass # ไม่แสดงอะไรถ้าไม่มีไฟล์
+        
+    st.write("---")
+    st.info("ℹ️ รูปแบบใหม่: ค้นหารหัส 12 หลัก (A-Z, 0-9)")
+
+    tab1, tab2 = st.tabs(["📂 อัปโหลดหลายรูป", "📷 ถ่ายรูป"])
+
+    # TAB 1: Batch Upload
+    with tab1:
+        uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+        if uploaded_files:
+            st.success(f"กำลังประมวลผล {len(uploaded_files)} รูป...")
+            st.markdown("---")
+            for i, uploaded_file in enumerate(uploaded_files):
+                col1, col2 = st.columns([1, 3])
+                try:
+                    image = Image.open(uploaded_file)
+                    with col1:
+                        st.image(image, width=100, caption=f"รูปที่ {i+1}")
+                    with col2:
+                        with st.spinner('Scanning...'):
+                            final_code = smart_read(image)
+                            if final_code and "Error:" in final_code:
+                                st.error(final_code)
+                            elif final_code:
+                                st.code(final_code, language=None)
+                                if len(final_code) == 12:
+                                    st.caption("✅ ครบ 12 หลัก")
+                                else:
+                                    st.caption(f"⚠️ ตรวจสอบ: อ่านได้ {len(final_code)} หลัก (ควรเป็น 12)")
+                            else:
+                                st.error("❌ อ่านไม่ออก")
+                except Exception as e:
+                    st.error(f"ไฟล์เสียหาย: {e}")
+                st.markdown("---")
+
+    # TAB 2: Camera
+    with tab2:
+        camera_image = st.camera_input("ถ่ายรูป")
+        if camera_image is not None:
+            image = Image.open(camera_image)
+            with st.spinner('Scanning...'):
+                final_code = smart_read(image)
+                if final_code and "Error:" in final_code:
+                    st.error(final_code)
+                elif final_code:
+                    st.code(final_code, language=None)
+                    if len(final_code) == 12:
+                        st.caption("✅ ครบ 12 หลัก")
+                    else:
+                        st.caption(f"⚠️ ตรวจสอบ: อ่านได้ {len(final_code)} หลัก (ควรเป็น 12)")
+                else:
+                    st.warning("ไม่พบรหัส")
+
+except Exception as main_e:
+    st.error(f"Critical Error: {main_e}")
