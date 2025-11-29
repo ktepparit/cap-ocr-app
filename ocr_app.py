@@ -1,55 +1,114 @@
 import streamlit as st
 import google.generativeai as genai
+from PIL import Image
 
 # --- ตั้งค่าหน้าเว็บ ---
-st.set_page_config(page_title="Debug Model Checker", page_icon="🛠️")
-
-st.title("🛠️ เครื่องมือตรวจสอบรายชื่อ Model")
-st.info("หน้านี้ใช้สำหรับเช็คว่า Server มองเห็นโมเดลชื่ออะไรบ้าง")
+st.set_page_config(page_title="Kratingdaeng AI Scanner", page_icon="🍌", layout="centered")
 
 # --- ส่วนใส่ API Key ---
-api_key = st.text_input("ใส่ Google API Key เพื่อตรวจสอบ", type="password")
-
-if st.button("กดเพื่อตรวจสอบรายชื่อ Model"):
+with st.sidebar:
+    st.header("🔑 ตั้งค่าระบบ")
+    st.success("Model: nano-banana-pro-preview") # โชว์ชื่อรุ่นให้เห็นชัดๆ
+    
+    # ⚠️ ใส่ API Key ของคุณตรงนี้
+    default_api_key = "" 
+    
+    api_key_input = st.text_input("ใส่ Google API Key", value=default_api_key, type="password")
+    api_key = api_key_input if api_key_input else default_api_key
+    
     if not api_key:
-        st.warning("⚠️ กรุณาใส่ API Key ก่อนครับ")
-    else:
-        try:
-            # ตั้งค่า API
-            genai.configure(api_key=api_key)
-            
-            st.write("⏳ กำลังติดต่อ Google Server...")
-            
-            # ดึงรายชื่อโมเดลทั้งหมดที่บัญชีนี้ใช้ได้
-            available_models = []
-            for m in genai.list_models():
-                # กรองเฉพาะโมเดลที่สร้างเนื้อหาได้ (generateContent)
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
-            st.success("✅ เชื่อมต่อสำเร็จ! นี่คือรายชื่อโมเดลที่คุณใช้ได้:")
-            
-            # แสดงรายชื่อโมเดล
-            st.code("\n".join(available_models))
-            
-            st.markdown("---")
-            st.subheader("ผลการวิเคราะห์:")
-            
-            # เช็คว่ามีตัวที่เราต้องการไหม
-            if 'models/gemini-1.5-flash' in available_models:
-                st.success("✅ พบโมเดล 'gemini-1.5-flash' (ใช้งานได้ปกติ)")
-            else:
-                st.error("❌ ไม่พบโมเดล 'gemini-1.5-flash'")
-                st.warning("""
-                **สาเหตุที่เป็นไปได้:**
-                1. ไลบรารี google-generativeai ในเครื่องเก่าเกินไป (ต้องแก้ requirements.txt)
-                2. API Key ของคุณยังไม่ได้รับสิทธิ์เข้าถึงโมเดลนี้
-                """)
-                
-                # เช็คตัวสำรอง
-                if 'models/gemini-pro-vision' in available_models:
-                    st.info("💡 แต่พบ 'gemini-pro-vision' สามารถใช้ตัวนี้แทนได้")
+        st.warning("⚠️ ต้องใส่ API Key ก่อนใช้งาน")
 
-        except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อ: {e}")
-            st.caption("ลองตรวจสอบว่า API Key ถูกต้องหรือไม่")
+# --- ฟังก์ชันอ่านภาพด้วย Gemini ---
+def gemini_vision_scan(image_pil, key):
+    try:
+        # ตั้งค่าโมเดล
+        genai.configure(api_key=key)
+        
+        # ✅ ใช้โมเดลตัวเทพที่คุณเลือก
+        model = genai.GenerativeModel('nano-banana-pro-preview')
+
+        # --- Prompt คำสั่ง ---
+        prompt = """
+        Analyze this image of a bottle cap printed code.
+        Task: Extract the exact 12-character alphanumeric code.
+
+        Constraints:
+        - The code is strictly 12 characters long.
+        - Characters are A-Z (uppercase) and 0-9.
+        - IGNORE "P Bev", "21", "HDPE" or plastic markings.
+        - Be extremely precise with dot-matrix text (e.g., distinguish 'Z' from '7', 'W' from 'I').
+        
+        Output: ONLY the code string.
+        """
+
+        # ส่งรูปและคำสั่งไป
+        response = model.generate_content([prompt, image_pil])
+        return response.text.strip()
+        
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# --- ส่วนแสดงผล UI ---
+try:
+    try:
+        st.image("banner.png", width=150)
+    except:
+        pass 
+        
+    st.title("⚡ Kratingdaeng AI Scanner")
+    st.caption("Powered by: nano-banana-pro-preview 🍌") 
+    st.write("---")
+
+    if api_key:
+        tab1, tab2 = st.tabs(["📂 อัปโหลดรูป", "📷 ถ่ายรูป"])
+
+        # TAB 1: Upload
+        with tab1:
+            uploaded_files = st.file_uploader("เลือกรูปภาพ...", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+            if uploaded_files:
+                st.success(f"กำลังส่งให้ 'Banana Pro' วิเคราะห์ {len(uploaded_files)} รูป...")
+                st.markdown("---")
+                for i, uploaded_file in enumerate(uploaded_files):
+                    col1, col2 = st.columns([1, 3])
+                    image = Image.open(uploaded_file)
+                    with col1:
+                        st.image(image, width=100, caption=f"Img {i+1}")
+                    with col2:
+                        with st.spinner('กำลังประมวลผล...'):
+                            code = gemini_vision_scan(image, api_key)
+                            
+                            if "Error" in code:
+                                st.error(code)
+                                st.caption("ถ้าโมเดลนี้ใช้ไม่ได้ ให้ลองเปลี่ยนกลับเป็น gemini-2.0-flash")
+                            else:
+                                clean_code = code.replace(" ", "").replace("\n", "")
+                                st.code(clean_code, language=None)
+                                
+                                if len(clean_code) == 12:
+                                    st.caption("✅ ครบ 12 หลัก")
+                                else:
+                                    st.caption(f"⚠️ อ่านได้ {len(clean_code)} หลัก")
+                    st.markdown("---")
+
+        # TAB 2: Camera
+        with tab2:
+            camera_image = st.camera_input("ถ่ายรูป")
+            if camera_image is not None:
+                image = Image.open(camera_image)
+                with st.spinner('กำลังประมวลผล...'):
+                    code = gemini_vision_scan(image, api_key)
+                    if "Error" in code:
+                        st.error(code)
+                    else:
+                        clean_code = code.replace(" ", "").replace("\n", "")
+                        st.code(clean_code, language=None)
+                        if len(clean_code) == 12:
+                            st.caption("✅ ครบ 12 หลัก")
+                        else:
+                            st.caption(f"⚠️ อ่านได้ {len(clean_code)} หลัก")
+    else:
+        st.info("👈 กรุณาใส่ API Key ทางด้านซ้ายเพื่อเริ่มใช้งาน")
+
+except Exception as main_e:
+    st.error(f"Critical: {main_e}")
